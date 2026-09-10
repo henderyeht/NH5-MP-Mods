@@ -26,3 +26,4 @@ A first-install backup is kept next to `Assembly-CSharp.dll`.
 ```
 dotnet publish "NH5MpFinalRelease.csproj" -c Release -r win-x64 --self-contained true
 ```
+
