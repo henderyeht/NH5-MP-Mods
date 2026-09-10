@@ -41,14 +41,33 @@ internal static class Program
         return 0;
     }
 
-    internal static string? FindGameRoot()
+    internal static string[] FindAllGameRoots()
     {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var list = new List<string>();
         foreach (var root in CandidateGameRoots())
         {
-            if (File.Exists(DllFromGameRoot(root)))
-                return root;
+            try
+            {
+                if (!Directory.Exists(root))
+                    continue;
+                var full = Path.GetFullPath(root);
+                if (!seen.Add(full))
+                    continue;
+                if (File.Exists(DllFromGameRoot(full)))
+                    list.Add(full);
+            }
+            catch
+            {
+            }
         }
-        return null;
+        return list.ToArray();
+    }
+
+    internal static string? FindGameRoot()
+    {
+        var all = FindAllGameRoots();
+        return all.Length == 0 ? null : all[0];
     }
 
     static IEnumerable<string> CandidateGameRoots()
@@ -126,6 +145,65 @@ internal static class Program
             && strings.Any(s => string.Equals(s, RevivalFutureUrl, StringComparison.OrdinalIgnoreCase));
     }
 
+    internal static bool IsAlreadyInstalled(string dll)
+    {
+        if (IsYearSplitGetBaseUrl(dll))
+            return true;
+        var strings = ReadUrlStrings(dll);
+        return strings.Any(s => string.Equals(s, RevivalPresentUrl, StringComparison.OrdinalIgnoreCase))
+            && !CanYearSplit(dll);
+    }
+
+    internal static bool CanYearSplit(string dll)
+    {
+        if (HasStockYearUrls(dll))
+            return true;
+        var stock = FindStockSource(dll);
+        if (stock != null
+            && !string.Equals(stock, dll, StringComparison.OrdinalIgnoreCase)
+            && HasStockYearUrls(stock))
+            return true;
+        try
+        {
+            using var asm = Read(dll);
+            return HasFutureYearApi(asm.MainModule);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static bool HasFutureYearApi(ModuleDefinition module)
+    {
+        foreach (var type in AllTypes(module))
+        {
+            if (!string.Equals(type.Name, "GameYearManager", StringComparison.Ordinal))
+                continue;
+            if (type.Methods.Any(m => m.Name == "IsFutureYearActive"))
+                return true;
+        }
+        return FindMethodRef(module, mr => mr.Name == "IsFutureYearActive" && mr.DeclaringType.Name == "GameYearManager") != null
+            && FindMethodRef(module, mr =>
+                mr.Name == "get_Instance"
+                && mr.DeclaringType.FullName.Contains("GameYearManager", StringComparison.Ordinal)) != null;
+    }
+
+    internal static string DescribeInstall(string gameRoot)
+    {
+        var dll = DllFromGameRoot(gameRoot);
+        try
+        {
+            var year = CanYearSplit(dll) ? "2020+2022" : "2020 only";
+            var tag = IsAlreadyInstalled(dll) ? "patched" : "needs patch";
+            return year + " | " + tag + " | " + gameRoot;
+        }
+        catch (Exception ex)
+        {
+            return gameRoot + " (" + ex.Message + ")";
+        }
+    }
+
     internal static string ReadCurrentUrl(string dll)
     {
         var strings = ReadUrlStrings(dll);
@@ -182,12 +260,12 @@ internal static class Program
 
     internal static void Apply(string dll)
     {
-        if (IsYearSplitGetBaseUrl(dll))
+        if (IsAlreadyInstalled(dll))
             return;
 
         var stock = FindStockSource(dll);
         var backup = BackupPath(dll);
-        if (!File.Exists(backup) && HasStockYearUrls(dll))
+        if (!File.Exists(backup))
             File.Copy(dll, backup);
 
         var tmp = dll + ".tmp-seturl";
@@ -197,6 +275,7 @@ internal static class Program
         using (var live = Read(dll))
         {
             var dest = FindGetBaseUrl(live) ?? throw new InvalidOperationException("This DLL has no NGUtil.GetBaseURL.");
+            var yearSplit = false;
             if (stock != null && !string.Equals(stock, dll, StringComparison.OrdinalIgnoreCase))
             {
                 using var stockAsm = Read(stock);
@@ -204,17 +283,49 @@ internal static class Program
                 CopyMethodBody(src, dest);
             }
             if (stock != null)
+            {
                 ReplaceYearUrls(dest);
-            else
-                EmitYearSplitGetBaseUrl(dest);
-            if (!HasRevivalYearUrls(dest))
-                throw new InvalidOperationException("GetBaseURL did not keep both year URLs.");
+                yearSplit = HasRevivalYearUrls(dest);
+            }
+            if (!yearSplit && HasFutureYearApi(live.MainModule))
+            {
+                try
+                {
+                    EmitYearSplitGetBaseUrl(dest);
+                    yearSplit = HasRevivalYearUrls(dest);
+                }
+                catch (InvalidOperationException)
+                {
+                    yearSplit = false;
+                }
+            }
+            if (!yearSplit)
+                RewritePresentOnly(dest);
+            if (!HasRevivalPresent(dest))
+                throw new InvalidOperationException("GetBaseURL did not keep the 2020 revival URL.");
             live.Write(tmp);
         }
 
         File.Copy(tmp, dll, overwrite: true);
         try { File.Delete(tmp); }
         catch (IOException) { }
+    }
+
+    static void RewritePresentOnly(MethodDefinition method)
+    {
+        method.Body.ExceptionHandlers.Clear();
+        method.Body.Variables.Clear();
+        method.Body.Instructions.Clear();
+        method.Body.InitLocals = false;
+        var il = method.Body.GetILProcessor();
+        il.Emit(OpCodes.Ldstr, RevivalPresentUrl);
+        il.Emit(OpCodes.Ret);
+        method.Body.MaxStackSize = 1;
+    }
+
+    static bool HasRevivalPresent(MethodDefinition method)
+    {
+        return UrlStrings(method).Any(s => string.Equals(s, RevivalPresentUrl, StringComparison.OrdinalIgnoreCase));
     }
 
     static bool HasRevivalYearUrls(MethodDefinition method)
@@ -413,18 +524,31 @@ internal static class Program
     }
 }
 
+internal sealed class GameInstall
+{
+    public string Root { get; }
+    public string Label { get; }
+    public GameInstall(string root, string label)
+    {
+        Root = root;
+        Label = label;
+    }
+    public override string ToString() => Label;
+}
+
 internal sealed class MainForm : Form
 {
-    readonly TextBox _game;
+    readonly ListBox _installs;
     readonly Label _status;
     readonly Button _install;
+    readonly Button _installAll;
 
     public MainForm()
     {
         Text = "NH5 MP Final Release";
         StartPosition = FormStartPosition.CenterScreen;
-        Width = 640;
-        Height = 236;
+        Width = 720;
+        Height = 360;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -432,80 +556,159 @@ internal sealed class MainForm : Form
         var intro = new Label
         {
             Left = 16,
-            Top = 14,
-            Width = 590,
+            Top = 12,
+            Width = 670,
             Height = 48,
-            Text = "Close NASCAR Heat 5 first. This keeps 2020 on /n2020/ and 2022 on /n2022/. If your game folder is not found, browse to it, then click Install."
+            Text = "Close NASCAR Heat 5 first. Pick which copy to patch if you have more than one. A 2020-only install (no Next Gen in Assembly-CSharp) still gets /n2020/ so Challenges work."
         };
         Controls.Add(intro);
 
-        Controls.Add(new Label { Left = 16, Top = 70, Width = 80, Text = "Game folder" });
-        _game = new TextBox { Left = 100, Top = 66, Width = 390 };
-        Controls.Add(_game);
-        var browse = new Button { Left = 500, Top = 64, Width = 100, Text = "Browse..." };
-        browse.Click += (_, _) => Browse();
+        Controls.Add(new Label { Left = 16, Top = 64, Width = 80, Text = "Installs" });
+        _installs = new ListBox { Left = 100, Top = 64, Width = 500, Height = 120 };
+        Controls.Add(_installs);
+        var browse = new Button { Left = 610, Top = 64, Width = 80, Height = 28, Text = "Browse..." };
+        browse.Click += (_, _) => RunSafe(Browse);
         Controls.Add(browse);
 
-        _install = new Button { Left = 100, Top = 108, Width = 160, Height = 32, Text = "Install" };
-        _install.Click += (_, _) => RunSafe(Install);
+        _install = new Button { Left = 100, Top = 196, Width = 160, Height = 32, Text = "Install selected" };
+        _install.Click += (_, _) => RunSafe(InstallSelected);
         Controls.Add(_install);
 
-        _status = new Label { Left = 16, Top = 154, Width = 590, Height = 36, Text = "" };
+        _installAll = new Button { Left = 272, Top = 196, Width = 160, Height = 32, Text = "Install all" };
+        _installAll.Click += (_, _) => RunSafe(InstallAll);
+        Controls.Add(_installAll);
+
+        _status = new Label { Left = 16, Top = 244, Width = 670, Height = 64, Text = "" };
         Controls.Add(_status);
 
-        var found = Program.FindGameRoot();
-        if (found != null)
-            _game.Text = found;
         Shown += (_, _) => BeginInvoke(TryAutoInstall);
+    }
+
+    void RefreshList(string? selectRoot = null)
+    {
+        var keep = selectRoot;
+        var items = new List<GameInstall>();
+        foreach (var root in Program.FindAllGameRoots())
+            items.Add(new GameInstall(root, Program.DescribeInstall(root)));
+        if (!string.IsNullOrWhiteSpace(keep)
+            && items.All(i => !string.Equals(i.Root, keep, StringComparison.OrdinalIgnoreCase)))
+        {
+            var dll = Program.ResolveDll(keep);
+            if (dll != null)
+            {
+                var root = GameRootFromDll(dll);
+                items.Add(new GameInstall(root, Program.DescribeInstall(root)));
+            }
+        }
+        _installs.Items.Clear();
+        foreach (var item in items)
+            _installs.Items.Add(item);
+        if (_installs.Items.Count == 0)
+            return;
+        var idx = 0;
+        if (!string.IsNullOrWhiteSpace(keep))
+        {
+            for (var i = 0; i < _installs.Items.Count; i++)
+            {
+                if (_installs.Items[i] is GameInstall gi
+                    && string.Equals(gi.Root, keep, StringComparison.OrdinalIgnoreCase))
+                {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+        _installs.SelectedIndex = idx;
+    }
+
+    static string GameRootFromDll(string dll)
+    {
+        var managed = Path.GetDirectoryName(dll) ?? ".";
+        var data = Path.GetDirectoryName(managed) ?? managed;
+        var root = Path.GetDirectoryName(data);
+        return string.IsNullOrWhiteSpace(root) ? managed : root;
     }
 
     void Browse()
     {
         using var dlg = new FolderBrowserDialog
         {
-            Description = "Select the NASCAR Heat 5 folder, NASCARHeat5_Data, or Managed",
+            Description = "Select a NASCAR Heat 5 folder, NASCARHeat5_Data, or Managed",
             UseDescriptionForTitle = true,
             ShowNewFolderButton = false
         };
-        if (!string.IsNullOrWhiteSpace(_game.Text) && Directory.Exists(_game.Text))
-            dlg.SelectedPath = _game.Text;
+        if (_installs.SelectedItem is GameInstall selected && Directory.Exists(selected.Root))
+            dlg.SelectedPath = selected.Root;
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
-        _game.Text = dlg.SelectedPath;
-    }
-
-    string RequireDll()
-    {
-        return Program.ResolveDll(_game.Text)
-            ?? throw new InvalidOperationException("Could not find Assembly-CSharp.dll. Browse to NASCAR Heat 5, NASCARHeat5_Data, or Managed.");
+        var dll = Program.ResolveDll(dlg.SelectedPath)
+            ?? throw new InvalidOperationException("Could not find Assembly-CSharp.dll in that folder.");
+        RefreshList(GameRootFromDll(dll));
     }
 
     void TryAutoInstall()
     {
-        if (Program.ResolveDll(_game.Text) == null)
+        RefreshList();
+        if (_installs.Items.Count == 0)
         {
-            _status.Text = "Browse to your NASCAR Heat 5 folder, then click Install.";
+            _status.Text = "No NASCAR Heat 5 folder was found. Browse to a copy, then click Install selected.";
             return;
         }
-        RunSafe(Install);
+        if (_installs.Items.Count == 1)
+        {
+            RunSafe(InstallSelected);
+            return;
+        }
+        _status.Text = "More than one copy was found. Select one and click Install selected, or Install all.";
     }
 
-    void Install()
+    void InstallSelected()
     {
         if (Program.HeatIsRunning())
             throw new InvalidOperationException("Close NASCAR Heat 5 first, then run NH5 MP Final Release again.");
-        var dll = RequireDll();
-        if (Program.IsYearSplitGetBaseUrl(dll))
-        {
-            Done("NH5 MP Final Release is already installed.");
-            return;
-        }
-        Program.Apply(dll);
-        Done("NH5 MP Final Release finished installing.");
+        if (_installs.SelectedItem is not GameInstall item)
+            throw new InvalidOperationException("Select a game folder, or Browse to one.");
+        PatchOne(item.Root);
+        RefreshList(item.Root);
+        FinishIfDone("NH5 MP Final Release finished installing that copy.");
     }
 
-    void Done(string message)
+    void InstallAll()
     {
+        if (Program.HeatIsRunning())
+            throw new InvalidOperationException("Close NASCAR Heat 5 first, then run NH5 MP Final Release again.");
+        if (_installs.Items.Count == 0)
+            throw new InvalidOperationException("Browse to a NASCAR Heat 5 folder first.");
+        var roots = _installs.Items.Cast<GameInstall>().Select(i => i.Root).ToArray();
+        foreach (var root in roots)
+            PatchOne(root);
+        RefreshList();
+        FinishIfDone("NH5 MP Final Release finished installing every listed copy.");
+    }
+
+    static void PatchOne(string gameRoot)
+    {
+        var dll = Program.DllFromGameRoot(gameRoot);
+        if (!File.Exists(dll))
+            throw new InvalidOperationException("Could not find Assembly-CSharp.dll in " + gameRoot);
+        if (Program.IsAlreadyInstalled(dll))
+            return;
+        Program.Apply(dll);
+    }
+
+    void FinishIfDone(string message)
+    {
+        var remaining = _installs.Items.Cast<GameInstall>().Any(i =>
+        {
+            try { return !Program.IsAlreadyInstalled(Program.DllFromGameRoot(i.Root)); }
+            catch { return true; }
+        });
+        _status.Text = message;
+        if (remaining)
+        {
+            _status.Text += " Other copies still need a patch.";
+            return;
+        }
         MessageBox.Show(this, message, "NH5 MP Final Release", MessageBoxButtons.OK, MessageBoxIcon.Information);
         Application.Exit();
     }
