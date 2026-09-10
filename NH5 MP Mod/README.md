@@ -20,3 +20,4 @@ The first install keeps a backup next to `Assembly-CSharp.dll`. Only `NGUtil.Get
 ```
 dotnet publish "NH5SetServerUrl.csproj" -c Release -r win-x64 --self-contained true
 ```
+
