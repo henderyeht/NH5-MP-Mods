@@ -28,9 +28,8 @@ If you already used **NH5 MP Mod**, you can run **NH5 MP Final Release** later t
 
 1. Close NASCAR Heat 5.
 2. Run `NH5 MP Final Release.exe`.
-3. One copy: it patches automatically.
-4. Several copies: pick from the list, Browse to another folder, or Install all.
-5. A popup confirms it finished, then the app closes.
+3. Select a folder (or Browse to one) and click **Install selected**.
+4. Repeat for every other copy. It does not patch on its own.
 
 A backup of `Assembly-CSharp.dll` is kept next to the original on first install.
 

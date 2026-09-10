@@ -559,7 +559,7 @@ internal sealed class MainForm : Form
             Top = 12,
             Width = 670,
             Height = 48,
-            Text = "Close NASCAR Heat 5 first. Pick which copy to patch if you have more than one. A 2020-only install (no Next Gen in Assembly-CSharp) still gets /n2020/ so Challenges work."
+            Text = "Close NASCAR Heat 5 first. Choose a folder and click Install selected. Browse if the copy is not listed. A 2020-only install (no Next Gen in Assembly-CSharp) still gets /n2020/ so Challenges work."
         };
         Controls.Add(intro);
 
@@ -581,7 +581,7 @@ internal sealed class MainForm : Form
         _status = new Label { Left = 16, Top = 244, Width = 670, Height = 64, Text = "" };
         Controls.Add(_status);
 
-        Shown += (_, _) => BeginInvoke(TryAutoInstall);
+        Shown += (_, _) => BeginInvoke(ShowInstalls);
     }
 
     void RefreshList(string? selectRoot = null)
@@ -646,7 +646,7 @@ internal sealed class MainForm : Form
         RefreshList(GameRootFromDll(dll));
     }
 
-    void TryAutoInstall()
+    void ShowInstalls()
     {
         RefreshList();
         if (_installs.Items.Count == 0)
@@ -654,12 +654,7 @@ internal sealed class MainForm : Form
             _status.Text = "No NASCAR Heat 5 folder was found. Browse to a copy, then click Install selected.";
             return;
         }
-        if (_installs.Items.Count == 1)
-        {
-            RunSafe(InstallSelected);
-            return;
-        }
-        _status.Text = "More than one copy was found. Select one and click Install selected, or Install all.";
+        _status.Text = "Select a copy and click Install selected. Browse to another folder if it is not listed.";
     }
 
     void InstallSelected()
@@ -670,7 +665,7 @@ internal sealed class MainForm : Form
             throw new InvalidOperationException("Select a game folder, or Browse to one.");
         PatchOne(item.Root);
         RefreshList(item.Root);
-        FinishIfDone("NH5 MP Final Release finished installing that copy.");
+        FinishInstall("NH5 MP Final Release finished installing that copy. Browse to another folder if you have more.");
     }
 
     void InstallAll()
@@ -683,7 +678,7 @@ internal sealed class MainForm : Form
         foreach (var root in roots)
             PatchOne(root);
         RefreshList();
-        FinishIfDone("NH5 MP Final Release finished installing every listed copy.");
+        FinishInstall("NH5 MP Final Release finished installing every listed copy. Browse to another folder if you have more.");
     }
 
     static void PatchOne(string gameRoot)
@@ -696,21 +691,10 @@ internal sealed class MainForm : Form
         Program.Apply(dll);
     }
 
-    void FinishIfDone(string message)
+    void FinishInstall(string message)
     {
-        var remaining = _installs.Items.Cast<GameInstall>().Any(i =>
-        {
-            try { return !Program.IsAlreadyInstalled(Program.DllFromGameRoot(i.Root)); }
-            catch { return true; }
-        });
         _status.Text = message;
-        if (remaining)
-        {
-            _status.Text += " Other copies still need a patch.";
-            return;
-        }
         MessageBox.Show(this, message, "NH5 MP Final Release", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        Application.Exit();
     }
 
     void RunSafe(Action action)
