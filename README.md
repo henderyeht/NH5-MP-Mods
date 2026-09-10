@@ -39,3 +39,4 @@ A backup of `Assembly-CSharp.dll` is kept next to the original on first install.
 dotnet publish "NH5 MP Mod\NH5SetServerUrl.csproj" -c Release -r win-x64 --self-contained true
 dotnet publish "NH5 MP Final Release\NH5MpFinalRelease.csproj" -c Release -r win-x64 --self-contained true
 ```
+
