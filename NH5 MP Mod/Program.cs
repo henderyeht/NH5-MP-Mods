@@ -287,3 +287,4 @@ internal sealed class MainForm : Form
         }
     }
 }
+
